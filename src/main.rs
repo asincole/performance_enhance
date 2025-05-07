@@ -1,46 +1,76 @@
 use anyhow::Context;
 use std::fs;
 
-const DATA_TRANSFER_MOV: [(&'static str, u8); 1] = [("mov", 0b100010)];
+#[cfg(test)]
+mod main_tests;
 
 #[derive(Debug, PartialEq)]
-enum MovInstructionTypes {
-    RegisterOrMemoryToOrFromRegister = 0b10001000,
-    RegisterOrMemoryToOrFromSegmentRegister = 0b10001100,
-    ImmediateToRegisterOrMemory = 0b11000110,
-    ImmediateToRegister = 0b10110000,
-    MemoryToAccumulator = 0b10100000,
-    AccumulatorToMemory = 0b10100010,
+enum MovInstructionType {
+    RegisterOrMemoryToOrFromRegister,  // opcode -> 0b100010xx
+    ImmediateToRegisterOrMemory,       // opcode -> 0b1100011x
+    ImmediateToRegister,               // opcode -> 0b1011xxxx
+    MemoryToAccumulator,               // opcode -> 0b1010000x
+    AccumulatorToMemory,               // opcode -> 0b1010001x
+    RegisterOrMemoryToSegmentRegister, // opcode -> 0b10001110
+    SegmentRegisterToRegisterOrMemory, // opcode -> 0b10001100
 }
 
-impl MovInstructionTypes {
+impl MovInstructionType {
+    // masks
+    const REG_MEM_MASK: u8 = 0xFC; // 11111100
+    const ACC_MEM_MASK: u8 = 0xFE; // 11111110
+    const IMM_REG_MASK: u8 = 0xF0; // 11110000
+
+    /*
+        TODO: add extra benchmark to see if putting the opcode directly in the MovInstructionType
+        enum has any performance benefits in lieu of using constants here 
+    */
+    // opcode patterns
+    const REG_MEM_PATTERN: u8 = 0x88; // 10001000
+    const MEM_ACC_PATTERN: u8 = 0xA0; // 10100000
+    const ACC_MEM_PATTERN: u8 = 0xA2; // 10100010
+    const IMM_REG_PATTERN: u8 = 0xB0; // 10110000
+    const IMM_MEM_PATTERN: u8 = 0xC6; // 11000110
+    const MEM_SEG_PATTERN: u8 = 0x8E; // 10001110
+    const SEG_MEM_PATTERN: u8 = 0x8C; // 10001100
+
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            b if (b & Self::REG_MEM_MASK) == Self::REG_MEM_PATTERN => {
+                Some(Self::RegisterOrMemoryToOrFromRegister)
+            }
+
+            b if (b & Self::ACC_MEM_MASK) == Self::MEM_ACC_PATTERN => {
+                Some(Self::MemoryToAccumulator)
+            }
+
+            b if (b & Self::ACC_MEM_MASK) == Self::ACC_MEM_PATTERN => {
+                Some(Self::AccumulatorToMemory)
+            }
+
+            b if (b & Self::IMM_REG_MASK) == Self::IMM_REG_PATTERN => {
+                Some(Self::ImmediateToRegister)
+            }
+
+            b if (b & Self::ACC_MEM_MASK) == Self::IMM_MEM_PATTERN => {
+                Some(Self::ImmediateToRegisterOrMemory)
+            }
+
+            b if (b & Self::ACC_MEM_MASK) == Self::MEM_SEG_PATTERN => {
+                Some(Self::RegisterOrMemoryToSegmentRegister)
+            }
+
+            b if (b & Self::ACC_MEM_MASK) == Self::SEG_MEM_PATTERN => {
+                Some(Self::SegmentRegisterToRegisterOrMemory)
+            }
+
+            _ => None,
+        }
+    }
 
     fn find_instruction(byte: u8) -> Self {
-        match byte {
-            byte if (byte & Self::RegisterOrMemoryToOrFromRegister as u8)
-                == Self::RegisterOrMemoryToOrFromRegister as u8 =>
-            {
-                Self::RegisterOrMemoryToOrFromRegister
-            }
-            byte if (byte & Self::ImmediateToRegister as u8) == Self::ImmediateToRegister as u8 => {
-                Self::ImmediateToRegister
-            }
-            byte if (byte & Self::ImmediateToRegisterOrMemory as u8)
-                == Self::ImmediateToRegisterOrMemory as u8 =>
-            {
-                Self::ImmediateToRegisterOrMemory
-            }
-            byte if (byte & Self::ImmediateToRegister as u8) == Self::ImmediateToRegister as u8 => {
-                Self::ImmediateToRegister
-            }
-            byte if (byte & Self::MemoryToAccumulator as u8) == Self::MemoryToAccumulator as u8 => {
-                Self::MemoryToAccumulator
-            }
-            byte if (byte & Self::AccumulatorToMemory as u8) == Self::AccumulatorToMemory as u8 => {
-                Self::AccumulatorToMemory
-            }
-            _ => panic!("Unable to determine instruction for byte {:08b}", byte),
-        }
+        Self::from_byte(byte)
+            .unwrap_or_else(|| panic!("Unable to determine instruction for byte {:08b}", byte))
     }
 }
 
@@ -133,16 +163,18 @@ fn extract_bits(byte: u8, start: u8, end: u8) -> u8 {
     (byte << start) >> (8 - num_bits)
 }
 fn disassemble_binary(data: &[u8]) -> String {
+    /*
+    TODO: if program doesn't panic, the number of ops should be roughly <= size of data slice passed
+    into the function, consider checking if creating a vector with with_capacity is simply a better approach
+    */
     let mut result: Vec<String> = vec![];
     let mut i = 0;
+    // TODO: fix chunk logic, depending on the opcode, you will need to pull in more bytes down the line;
     let chunk_size = 2;
     // println!("first chunk size: {:08b}", data[0]);
-    data.iter().for_each(|byte| {
-        println!("first chunk size: {:08b}", byte);
-    });
-    
+
     while i < data.len() {
-        // TODO: fix chunk logic;
+        // TODO: fix chunk logic, depending on the opcode, you will need to pull in more bytes down the line;
         let chunk = &data[i..i + chunk_size];
         if chunk.len() == 2 {
             // Combine 2 bytes into a 16-bit value
@@ -158,15 +190,10 @@ fn disassemble_binary(data: &[u8]) -> String {
             // println!("first byte {:08b}", chunk[0]);
             // println!("second byte {:08b}", chunk[1]);
 
-            let instruction = match MovInstructionTypes::find_instruction(chunk[0]) {
-                MovInstructionTypes::RegisterOrMemoryToOrFromRegister => "mov",
-                MovInstructionTypes::RegisterOrMemoryToOrFromSegmentRegister => "mov",
-                MovInstructionTypes::ImmediateToRegisterOrMemory => "mov",
-                MovInstructionTypes::ImmediateToRegister => "mov",
-                MovInstructionTypes::MemoryToAccumulator => "mov",
-                MovInstructionTypes::AccumulatorToMemory => "mov",
-            };
+            // TODO: use the instruction to determine how to handle following bytes
+            let _instruction = MovInstructionType::find_instruction(chunk[0]);
 
+            // TODO: improve this as we progress in the course
             let (source, mut destination) = match d {
                 // direction is from register (i.e. the data source is from a register)
                 0 => (RegisterOp::from_bits(w, reg), None),
@@ -188,7 +215,7 @@ fn disassemble_binary(data: &[u8]) -> String {
             match (destination, source) {
                 (Some(destination), Some(source)) => {
                     let operation = format!(
-                        "{instruction} {}, {}",
+                        "mov {}, {}",
                         destination.to_lowercase(),
                         source.to_lowercase()
                     );
@@ -204,69 +231,9 @@ fn disassemble_binary(data: &[u8]) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    let bin_file: Vec<u8> = fs::read("listing_0039_more_mov")
-        .context("Failed to open listing_0039_more_mov.asm")?;
+    let bin_file: Vec<u8> =
+        fs::read("listing_0039_more_mov").context("Failed to open listing_0039_more_mov.asm")?;
 
-    // println!("length {:#?}", bin_file.len());
-    // bin_file.iter().for_each(|byte| {
-    //     println!("{:08b}", byte);
-    // });
-    let result = disassemble_binary(&bin_file);
-    // println!("{}", result);
-    // println!("{:08b}", 0b100010);
-    // println!("{:08b}", 0b100010 << 2);
-    // println!("{:08b}", (0b100010 << 2) & 0b10001000);
-    // println!("{:08b}", (0b10110000) & 0b10001000);
-    // println!("{}", (0b10110000 & 0b10110000) == 0b10110000);
+    let _result = disassemble_binary(&bin_file);
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_disassemble_single_register_binary() {
-        let bin_file: Vec<u8> = fs::read("listing_0037_single_register_mov")
-            .context("Failed to open listing_0037_single_register_mov")
-            .unwrap();
-
-        let expected_result = r"mov cx, bx";
-        assert_eq!(disassemble_binary(&bin_file), expected_result);
-    }
-
-    #[test]
-    fn test_disassemble_many_register_binary() {
-        let bin_file: Vec<u8> = fs::read("listing_0038_many_register_mov")
-            .context("Failed to open listing_0038_many_register_mov")
-            .unwrap();
-
-        let expected_result = r"mov cx, bx
-mov ch, ah
-mov dx, bx
-mov si, bx
-mov bx, di
-mov al, cl
-mov ch, ch
-mov bx, ax
-mov bx, si
-mov sp, di
-mov bp, ax";
-        assert_eq!(disassemble_binary(&bin_file), expected_result);
-    }
-    //     mov cl, 12
-    #[test]
-    fn test_disassemble_immediate_to_register_binary() {
-        let bin_file: Vec<u8> = "mov cx, bx".bytes().collect();
-        let bin_file: Vec<u8> = fs::read("listing_0037_single_register_mov")
-            .context("Failed to open listing_0037_single_register_mov")
-            .unwrap();
-
-        bin_file.iter().for_each(|byte| {
-            print!("{:08b}", byte);
-        });
-
-        let expected_result = r"mov cx, bx";
-        assert_eq!(disassemble_binary(&bin_file), expected_result);
-    }
 }
